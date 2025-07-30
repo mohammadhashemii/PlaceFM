@@ -1,0 +1,6 @@
+{
+    "placefm_agg_alpha": 0.9,
+    "placefm_agg_beta": 0.1,
+    "placefm_agg_gamma": 0,
+    "placefm_fuzziness": 1
+}

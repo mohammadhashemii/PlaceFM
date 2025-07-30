@@ -1,0 +1,5 @@
+{
+    "lr": 0.006,
+    "epoch": 200,
+    "attention_head": 5
+}
