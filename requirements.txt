@@ -1,0 +1,24 @@
+click==8.2.1
+dgl==2.4.0+cu121
+gdown==5.2.0
+geopandas==1.0.1
+ipdb==0.13.13
+matplotlib==3.10.3
+numpy==2.3.2
+pandas==2.3.1
+pyfpgrowth==1.0
+PyGSP==0.5.1
+pytorch_warmup==0.2.0
+scikit_learn==1.7.1
+scipy==1.16.1
+sentence_transformers==4.1.0
+Shapely==2.1.1
+torch==2.7.0
+torch_geometric==2.6.1
+torch_scatter==2.1.2
+torch_sparse==0.6.18
+# You may download the torch_scatter and torch_sparse from the following
+# pip install torch_scatter torch_sparse -f https://data.pyg.org/whl/torch-2.2.0++cu121.html
+# torch_scatter==2.1.2
+# torch_sparse==0.6.18
+tqdm==4.67.1
