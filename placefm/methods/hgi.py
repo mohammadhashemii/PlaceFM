@@ -46,7 +46,7 @@ class HGI:
         self.model.train()
         self.optimizer.zero_grad()
 
-        pos_poi_emb_list, neg_poi_emb_list, region_emb, neg_region_emb, city_emb = self.model(self.data)
+        pos_poi_emb_list, neg_poi_emb_list, region_emb, region_emb_ids, neg_region_emb, city_emb = self.model(self.data)
         loss = self.model.loss(pos_poi_emb_list, neg_poi_emb_list, region_emb, neg_region_emb, city_emb)
         loss.backward()
         clip_grad_norm_(self.model.parameters(), max_norm=args.max_norm)
@@ -54,7 +54,7 @@ class HGI:
         self.optimizer.step()
         with self.warmup_scheduler.dampening():
             self.scheduler.step()
-        return loss.item()
+        return loss.item(), region_emb_ids
 
     def train(self):
         args = self.args
@@ -63,9 +63,8 @@ class HGI:
         lowest_loss = math.inf
         region_emb_to_save = torch.FloatTensor(0)
         for epoch in range(1, args.epoch + 1):
-            loss = self.train_epoch()
+            loss, region_emb_ids = self.train_epoch()
             if epoch % 20 == 0 or epoch == 1 or epoch == args.epoch:
-                print(f"Epoch {epoch}/{args.epoch} - Loss: {loss:.4f}")
                 args.logger.info(f"Epoch {epoch}/{args.epoch} - Loss: {loss:.4f}")
             if loss < lowest_loss:
             # Save the embeddings with the lowest loss
@@ -74,7 +73,7 @@ class HGI:
 
         print(f"Finished training region embeddings for {args.city} with lowest loss: {lowest_loss:.4f}")
 
-        return region_emb_to_save
+        return region_emb_to_save, region_emb_ids
     
 
     def generate_embeddings(self, verbose=False):
@@ -82,7 +81,7 @@ class HGI:
         args = self.args
 
         start_total = timer()
-        region_emb = self.train()
+        region_emb, region_emb_ids = self.train()
         end_total = timer()
         
         if verbose:
@@ -92,5 +91,16 @@ class HGI:
         
         print(f"Total number of generated regions in {args.city}: {region_emb.size(0)}")
         saved_path = f"../checkpoints/hgi_{args.city}_region_embs.pt"
-        torch.save(region_emb, saved_path)
+
+        
+        # Save both region embeddings and region IDs in a dictionary
+    
+        save_obj = {
+            "x": region_emb,
+            "region_id": region_emb_ids
+        }
+
+        torch.save(save_obj, saved_path)
         print(f"Region embeddings of {args.city} has been save to {saved_path}")
+
+        return save_obj

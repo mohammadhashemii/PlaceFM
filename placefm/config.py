@@ -72,6 +72,13 @@ def method_config(args):
 @click.option('--alpha', default=0.1, help='for appnp', show_default=True)
 @click.option('--save_path', '--sp', default='../checkpoints', show_default=True, help='save path for synthetic graph')
 
+# ====== evaluation args ======
+@click.option('--eval', '-E', is_flag=True, show_default=True, help='whether to evaluate the model after training')
+@click.option('--run_eval', '-R', default=10, show_default=True, help='number of runs for evaluation')
+@click.option('--dt_model', default='rf', type=click.Choice(['rf', 'xgb', 'mlp']), show_default=True,
+              help='the downstream task model to use for final evaluation')
+@click.option('--embeddings', '-EM' , help='path to the region embeddings file')
+
 # ====== dataset args ======
 @click.option('--dataset', '-D', default='f-osm', show_default=True)
 @click.option('--city', '-C', default='atlanta', show_default=True)
@@ -79,6 +86,7 @@ def method_config(args):
 @click.option('--split', default='fixed', show_default=True,
               help='only support public split now, do not change it')  # 'fixed', 'random', 'few'
 @click.option('--load_path', '--lp', default='../data', show_default=True, help='save path for trained embeddings')
+@click.option('--dt_load_path', default='../data/downstream_tasks/zcta_dt.csv', show_default=True, help='downstream task data path')
 # ====== PlaceFm args ======
 @click.option("--placefm_agg_alpha", default=0.3, show_default=True)
 @click.option("--placefm_agg_beta", default=0.9, show_default=True)

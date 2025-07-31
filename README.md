@@ -65,13 +65,11 @@ cd placefm
 ```
 
 
-
-
 ### Baselines 
 
 #### 1. [HGI](https://www.sciencedirect.com/science/article/abs/pii/S0924271622003148): 
 
-To traing the HGI model and generate region embeddings:
+To train the HGI model and generate region embeddings:
 
 ```
 python train.py --dataset f-osm --method hgi --city <city name> --verbose
@@ -82,3 +80,28 @@ The generated embeddings will be saved in `checkpoints/`.
 
 ## Evaluate on Geospatial Donwstream Tasks
 
+To evaluate the effectiveness of generated region embeddings, we've implemented three downstream tasks:
+
+### Downstream Tasks
+
+1. **Population Density (PD) prediction**  
+    Predict the population density of each US zipcode.
+
+2. **Median House Price (HP) Prediction**  
+    estimate the median house price for each US zipcode.
+
+3. **Urban Functionality (UF)**  
+    TODO
+
+Run the following command to evaluate on abovementioned tasks. You can set the following parameters:
+
+- `--embeddings`: Path to the region embeddings file.
+- `--run_eval`: Number of evaluation runs (e.g., 10).
+- `--dt_model`: Downstream task model, options: `rf` (Random Forest), `xgb` (XGBoost), etc.
+- `--verbose`: Enable verbose output.
+
+```
+python test.py --embeddings <path to the embeddings> --run_eval 10 --dt_model rf --verbose
+```
+
+The results will be logged in `checkpoints/logs/`.

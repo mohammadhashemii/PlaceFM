@@ -9,7 +9,8 @@ from placefm.dataset.loader import get_dataset
 from placefm.utils import seed_everything
 
 from methods.hgi import HGI
-from methods.placefm import PlaceFM
+# from methods.placefm import PlaceFM
+from placefm.evaluator.eval_agent import Evaluator
 
 if __name__ == '__main__':
     args = get_args()
@@ -23,6 +24,10 @@ if __name__ == '__main__':
         agent = HGI(data=poi_graph, args=args)
 
     region_embs = agent.generate_embeddings(verbose=args.verbose)
-    # evaluator = Evaluator(args)
-    # res_mean, res_std = evaluator.evaluate(region_embs, model_type=args.final_eval_model)
-    # args.logger.info(f'Test Mean Accuracy: {100 * all_res[:, 0].mean():.2f} +/- {100 * all_res[:, 1].mean():.2f}')
+
+    if args.eval:
+        evaluator = Evaluator(args)
+
+        tasks = ['pd', 'hp']
+        for t in tasks:
+            res_dict = evaluator.evaluate(region_embs, task=t, verbose=args.verbose)

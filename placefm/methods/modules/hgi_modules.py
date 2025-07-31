@@ -183,7 +183,10 @@ class HierarchicalGraphInfomax(torch.nn.Module):
             poi_emb_of_another_region = pos_poi_emb[id_of_poi_in_another_region]
             pos_poi_emb_list.append(poi_emb_of_a_region)
             neg_poi_emb_list.append(poi_emb_of_another_region)
-        return pos_poi_emb_list, neg_poi_emb_list, region_emb, neg_region_emb, city_emb
+
+        region_emb_ids = region_ids.tolist()
+            
+        return pos_poi_emb_list, neg_poi_emb_list, region_emb, region_emb_ids, neg_region_emb, city_emb
 
     def discriminate_poi2region(self, poi_emb_list, region_emb, sigmoid=True):
         values = []
