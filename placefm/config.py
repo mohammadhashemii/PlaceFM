@@ -87,12 +87,15 @@ def method_config(args):
               help='only support public split now, do not change it')  # 'fixed', 'random', 'few'
 @click.option('--load_path', '--lp', default='../data', show_default=True, help='save path for trained embeddings')
 @click.option('--dt_load_path', default='../data/downstream_tasks/zcta_dt.csv', show_default=True, help='downstream task data path')
-# ====== PlaceFm args ======
+# ====== PlaceFM args ======
+@click.option('--clustering_method', default='kmeans', type=click.Choice(['kmeans', 'dbscan']), show_default=True)
+@click.option('--region_agg_method', default='mean', type=click.Choice(['mean', 'max']), show_default=True)
 @click.option("--placefm_agg_alpha", default=0.3, show_default=True)
 @click.option("--placefm_agg_beta", default=0.9, show_default=True)
 @click.option("--placefm_agg_gamma", default=0.0, show_default=True)
 @click.option("--placefm_fuzziness", default=1.0, show_default=True)
 @click.option("--placefm_rep_fuzz", default=20, show_default=True)
+@click.option("--placefm_kmeans_reduction_ratio", default=0.1, show_default=True)
 
 # ====== HGI args ======
 @click.option("--attention_head", type=int, default=4, show_default=True)

@@ -17,7 +17,7 @@ from tqdm import tqdm
 class HGI:
     """
     HGI (hierarchical Graph Infomax).
-    It outputs region embeddings (`feat_syn`) and labels (`label_syn`).
+    It outputs region embeddings.
     """
 
     def __init__(self, data, args, **kwargs):

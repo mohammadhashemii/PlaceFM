@@ -7,6 +7,8 @@ import torch.nn.functional as F
 import torch.sparse as ts
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, roc_auc_score
+from sklearn.neighbors import NearestNeighbors
+from kneed import KneeLocator
 from torch_sparse import SparseTensor,fill_diag,matmul,mul
 from torch_sparse import sum as sparsesum
 from torch_geometric.utils import degree
@@ -987,3 +989,36 @@ def add_feature_noise_test(data, noise_ratio, seed):
     mask[selected] = 1
     mask = torch.tensor(mask).bool().to(data.x.device)
     return delta_feat, mask
+
+
+def estimate_eps(X, min_samples=5):
+    """ 
+    
+    Estimate the epsilon parameter for DBSCAN clustering using the k-th nearest neighbor distance method.
+    
+    """
+    neighbors = NearestNeighbors(n_neighbors=min_samples)
+    neighbors_fit = neighbors.fit(X)
+    distances, indices = neighbors_fit.kneighbors(X)
+
+    # sort the k-th NN distance
+    distances = np.sort(distances[:, -1])
+    
+    # find "elbow"
+    kneedle = KneeLocator(range(len(distances)), distances, S=1.0, curve="convex", direction="increasing")
+    eps = distances[kneedle.knee] if kneedle.knee is not None else np.median(distances)
+
+    # Plot the knee curve and save the figure
+    # import matplotlib.pyplot as plt
+    # plt.figure(figsize=(8, 6))
+    # plt.plot(range(len(distances)), distances, label="k-th NN Distance")
+    # if kneedle.knee is not None:
+    #     plt.axvline(x=kneedle.knee, color='r', linestyle='--', label="Knee Point")
+    # plt.xlabel("Points")
+    # plt.ylabel("Distance")
+    # plt.title("Knee Curve for Epsilon Estimation")
+    # plt.legend()
+    # plt.savefig("knee_curve.png", dpi=300)
+    # plt.close()
+
+    return eps

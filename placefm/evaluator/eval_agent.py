@@ -1,8 +1,5 @@
 import numpy as np
 import pandas as pd
-import torch
-import torch.nn.functional as F
-from sklearn.ensemble import RandomForestRegressor as rf
 from sklearn import metrics
 
 from placefm.utils import seed_everything

@@ -9,7 +9,7 @@ from placefm.dataset.loader import get_dataset
 from placefm.utils import seed_everything
 
 from methods.hgi import HGI
-# from methods.placefm import PlaceFM
+from methods.placefm import PlaceFM
 from placefm.evaluator.eval_agent import Evaluator
 
 if __name__ == '__main__':

@@ -138,6 +138,8 @@ class TransAndInd:
             self.region_adjacency = data.region_adjacency if hasattr(data, 'region_adjacency') else None
             self.region_area = data.region_area if hasattr(data, 'region_area') else None
             self.sparse_adj = SparseTensor.from_edge_index(data.edge_index)
+            self.category = data.category if hasattr(data, 'category') else None
+            self.lat_lon = data.lat_lon if hasattr(data, 'lat_lon') else None
         # saint format use feat,labels,adj
         elif hasattr(data, 'feat_full'):
             self.adj_full = data.adj_full
