@@ -10,6 +10,7 @@ from placefm.utils import seed_everything
 
 from methods.hgi import HGI
 from methods.placefm import PlaceFM
+from methods.pdfm import PDFM
 from placefm.evaluator.eval_agent import Evaluator
 
 if __name__ == '__main__':
@@ -22,8 +23,12 @@ if __name__ == '__main__':
         agent = PlaceFM(data=poi_graph, args=args)
     elif args.method == 'hgi':
         agent = HGI(data=poi_graph, args=args)
+    elif args.method == 'pdfm':
+        agent = PDFM(data=poi_graph, args=args)
+    else:
+        raise ValueError(f"Unsupported method: {args.method}")
 
-    region_embs = agent.generate_embeddings(verbose=args.verbose)
+    region_embs = agent.generate_embeddings(verbose=args.verbose, save_path=None)
 
     if args.eval:
         evaluator = Evaluator(args)
