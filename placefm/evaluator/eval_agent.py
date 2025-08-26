@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
 from sklearn import metrics
-
+from sklearn.ensemble import RandomForestRegressor as rf
+from sklearn.neural_network import MLPRegressor as mlp
 from placefm.utils import seed_everything
 
 
@@ -173,7 +174,9 @@ class Evaluator:
             
             seed_everything(args.seed + i)
 
-
+            # Check if embeddings are not a numpy array, then transfer to CPU
+            if not isinstance(embs['x'], np.ndarray) and hasattr(embs['x'], 'device'):
+                embs['x'] = embs['x'].cpu()
             x_train, y_train, x_test, y_test = self.load_downstream_task_data(embs=embs['x'], 
                                                                             path=args.dt_load_path, 
                                                                             region_ids=region_ids, 

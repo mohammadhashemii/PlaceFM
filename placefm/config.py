@@ -70,7 +70,7 @@ def method_config(args):
 @click.option('--ntrans', default=1, show_default=True, help='number of transformations in SGC and APPNP')
 @click.option('--with_bn', is_flag=True, show_default=True)
 @click.option('--alpha', default=0.1, help='for appnp', show_default=True)
-@click.option('--save_path', '--sp', default='../checkpoints', show_default=True, help='save path for synthetic graph')
+@click.option('--save_path', '--sp', default='../checkpoints', show_default=True, help='save path for generated region embeddings')
 
 # ====== evaluation args ======
 @click.option('--eval', '-E', is_flag=True, show_default=True, help='whether to evaluate the model after training')
@@ -98,7 +98,7 @@ def method_config(args):
 @click.option("--placefm_kmeans_reduction_ratio", default=0.1, show_default=True)
 
 # ====== HGI args ======
-@click.option("--attention_head", type=int, default=4, show_default=True)
+@click.option("--hgi_attention_head", type=int, default=4, show_default=True)
 @click.option('--hgi_alpha', default=0.5, help='the hyperparameter to balance mutual information', show_default=True)
 @click.option("--max_norm", type=float, default=0.9, show_default=True)
 @click.option('--hgi_gamma', type=float, default=0.9, show_default=True)

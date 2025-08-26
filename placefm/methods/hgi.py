@@ -28,7 +28,7 @@ class HGI:
         self.model = HierarchicalGraphInfomax(
             hidden_channels=data.x.shape[1],
             poi_encoder=POIEncoder(data.x.shape[1], data.x.shape[1]),
-            poi2region=POI2Region(data.x.shape[1], args.attention_head),
+            poi2region=POI2Region(data.x.shape[1], args.hgi_attention_head),
             region2city=lambda z, area: torch.sigmoid((z.transpose(0, 1) * area).sum(dim=1)),
             corruption=corruption,
             alpha=args.hgi_alpha,
@@ -62,10 +62,10 @@ class HGI:
         print(f"Start training region embeddings for the city of {args.city}")
         lowest_loss = math.inf
         region_emb_to_save = torch.FloatTensor(0)
-        for epoch in range(1, args.epoch + 1):
+        for epoch in range(1, args.epochs + 1):
             loss, region_emb_ids = self.train_epoch()
-            if epoch % 20 == 0 or epoch == 1 or epoch == args.epoch:
-                args.logger.info(f"Epoch {epoch}/{args.epoch} - Loss: {loss:.4f}")
+            if epoch % 2 == 0 or epoch == 1 or epoch == args.epochs:
+                args.logger.info(f"Epoch {epoch}/{args.epochs} - Loss: {loss:.4f}")
             if loss < lowest_loss:
             # Save the embeddings with the lowest loss
                 region_emb_to_save = self.model.get_region_emb()
@@ -76,7 +76,7 @@ class HGI:
         return region_emb_to_save, region_emb_ids
     
 
-    def generate_embeddings(self, verbose=False):
+    def generate_embeddings(self, verbose=False, save_path=None):
         
         args = self.args
 
@@ -90,8 +90,6 @@ class HGI:
             )
         
         print(f"Total number of generated regions in {args.city}: {region_emb.size(0)}")
-        saved_path = f"../checkpoints/hgi_{args.city}_region_embs.pt"
-
         
         # Save both region embeddings and region IDs in a dictionary
     
@@ -100,7 +98,9 @@ class HGI:
             "region_id": region_emb_ids
         }
 
-        torch.save(save_obj, saved_path)
-        print(f"Region embeddings of {args.city} has been save to {saved_path}")
+        if save_path is not None:
+            save_path = f"../checkpoints/hgi_{args.city}_region_embs.pt"
+            torch.save(save_obj, save_path)
+            print(f"Region embeddings of {args.city} has been save to {save_path}")
 
         return save_obj

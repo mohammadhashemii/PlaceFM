@@ -1,5 +1,5 @@
 {
     "lr": 0.006,
-    "epoch": 20,
-    "attention_head": 5
+    "epochs": 20,
+    "hgi_attention_head": 5
 }

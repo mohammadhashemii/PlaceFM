@@ -147,20 +147,6 @@ class HierarchicalGraphInfomax(torch.nn.Module):
         """hard negative sampling procedure"""
         region_ids = torch.unique(data.y)
 
-
-        ##### NOT SURE ABOUT THIS PART ########
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        #
-        
         for region_id in region_ids:
             id_of_poi_in_a_region = (data.y == region_id).nonzero(as_tuple=True)[0]
             poi_emb_of_a_region = pos_poi_emb[id_of_poi_in_a_region]
