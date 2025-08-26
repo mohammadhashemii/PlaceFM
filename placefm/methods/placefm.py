@@ -29,7 +29,7 @@ class PlaceFM:
         
 
 
-    def generate_embeddings(self, verbose=False):
+    def generate_embeddings(self, verbose=False, save_path=None):
     
         args = self.args
 
@@ -80,7 +80,6 @@ class PlaceFM:
 
 
         region_emb = torch.vstack(region_emb_list)
-        import ipdb; ipdb.set_trace()
 
         end_total = timer()
         if verbose:
@@ -89,7 +88,6 @@ class PlaceFM:
             )
         
         print(f"Total number of generated regions in {args.city}: {region_emb.size(0)}")
-        saved_path = f"../checkpoints/placefm_{args.city}_region_embs.pt"
 
         
         # Save both region embeddings and region IDs in a dictionary
@@ -99,7 +97,9 @@ class PlaceFM:
             "region_id": region_emb_ids
         }
 
-        torch.save(save_obj, saved_path)
-        print(f"Region embeddings of {args.city} has been save to {saved_path}")
+        if save_path is not None:
+            save_path = f"../checkpoints/placefm_{args.city}_region_embs.pt"
+            torch.save(save_obj, save_path)
+            print(f"Region embeddings of {args.city} has been save to {save_path}")
 
         return save_obj
