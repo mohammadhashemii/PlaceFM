@@ -113,6 +113,8 @@ The results will be logged in `checkpoints/logs/`.
 
 If you find this repo helpful, we would appreciate it if you could cite our paper.
 
+
+---
 ```
 @article{hashemi2025placefm,
   title={PlaceFM: A Training-free Geospatial Foundation Model of Places using Large-Scale Point of Interest Data},
