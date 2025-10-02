@@ -3,7 +3,10 @@ import pandas as pd
 from sklearn import metrics
 from sklearn.ensemble import RandomForestRegressor as rf
 from sklearn.neural_network import MLPRegressor as mlp
-from placefm.utils import seed_everything
+from sklearn.tree import DecisionTreeRegressor as dt
+from xgboost import XGBRegressor as xgb
+
+from placefm.utils import seed_everything, plot_absolute_error
 
 
 class Evaluator:
@@ -59,22 +62,37 @@ class Evaluator:
         
         
 
-        x_train, y_train, x_test, y_test = data
+        x_train, y_train, train_region_ids, x_test, y_test, test_region_ids = data
 
-        if dt_model not in ['rf', 'xgb', 'mlp']:
-            raise ValueError(f"Unsupported model type: {dt_model}. Supported types are 'rf', 'xgb', 'mlp'.")
-        
-        model = eval(dt_model)(random_state=eval_idx)
+        if dt_model not in ['rf', 'xgb', 'mlp', 'dt']:
+            raise ValueError(f"Unsupported model type: {dt_model}. Supported types are 'rf', 'xgb', 'mlp', 'dt'.")
+        if dt_model == 'rf':
+            model = rf(n_estimators=100, random_state=eval_idx)
+        elif dt_model == 'xgb':
+            model = xgb(n_estimators=100, random_state=eval_idx, verbosity=1 if verbose else 0)
+        elif dt_model == 'mlp':
+            model = mlp(hidden_layer_sizes=(32, 16), max_iter=200, random_state=eval_idx, verbose=verbose)
+        elif dt_model == 'dt':
+            model = dt(random_state=eval_idx)
+
+        # model = eval(dt_model)(random_state=eval_idx)
         model.fit(x_train, y_train)
-        y_pred = model.predict(x_test)
+        y_train_pred = model.predict(x_train)
+        y_test_pred = model.predict(x_test)
+
+        train_abs_error = np.abs(y_train - y_train_pred)
+        test_abs_error = np.abs(y_test - y_test_pred)
+
+        abs_error_dict = {region_id: error for region_id, error in zip(train_region_ids, train_abs_error)}
+        abs_error_dict.update({region_id: error for region_id, error in zip(test_region_ids, test_abs_error)})
 
         metrics_dict = {
-            'mae': metrics.mean_absolute_error(y_test, y_pred),
-            'rmse': np.sqrt(metrics.mean_squared_error(y_test, y_pred)),
-            'r2': metrics.r2_score(y_test, y_pred)
+            'mae': metrics.mean_absolute_error(y_test, y_test_pred),
+            'rmse': np.sqrt(metrics.mean_squared_error(y_test, y_test_pred)),
+            'r2': metrics.r2_score(y_test, y_test_pred)
         }
 
-        return metrics_dict
+        return metrics_dict, abs_error_dict
 
     def load_downstream_task_data(self, embs, path, region_ids, task='pd'):
         """
@@ -103,15 +121,26 @@ class Evaluator:
             df = df.rename(columns={'Population Density (People per Square Kilometer)': 'target'})
         elif task == 'hp':
             # Process housing price data
-            df = df[['ZCTA', 'Median Value of Owner Occupied Units (Dollars)']]
-            df = df.rename(columns={'Median Value of Owner Occupied Units (Dollars)': 'target'})
+            df = df[['RegionName', '2024-08-31']]
+            df = df.rename(columns={'RegionName': 'ZCTA', '2024-08-31': 'target'})
+        elif task == 'pv':
+            # Process property value data
+            df = df[['place', '2022']]
+            df = df.rename(columns={'place': 'ZCTA'})
+            # Extract the numeric part of the ZCTA column using regex
+            df['ZCTA'] = df['ZCTA'].astype(str).str.extract(r'(\d{5})')[0]
+            df = df.rename(columns={'2022': 'target'})
 
         df['ZCTA'] = df['ZCTA'].astype(str).str.zfill(5)    
-        # Filter the dataframe to include only the specified region_ids
         region_ids_str = [str(z).zfill(5) for z in region_ids]
-        df = df[df['ZCTA'].isin(region_ids_str)]
 
+        mask = np.isin(region_ids_str, df['ZCTA'].values)
+        embs = embs[mask]
+        region_ids_str = np.array(region_ids_str)[mask]
+
+        df = df[df['ZCTA'].isin(region_ids_str)].reset_index(drop=True)
         targets = df['target'].values
+        region_ids = df['ZCTA'].values
 
         # Split into train and test
         num_samples = len(embs)
@@ -124,9 +153,11 @@ class Evaluator:
         x_test = embs[test_idx]
         y_train = targets[train_idx]
         y_test = targets[test_idx]
-        
 
-        return x_train, y_train, x_test, y_test
+        train_region_ids = region_ids[train_idx]
+        test_region_ids = region_ids[test_idx]
+
+        return x_train, y_train, train_region_ids, x_test, y_test, test_region_ids
 
     def evaluate(self, embs, task='pd', verbose=False):
         """
@@ -151,8 +182,8 @@ class Evaluator:
         
         args = self.args    
 
-        if task not in ['pd', 'uf', 'hp']:
-            raise ValueError(f"Unsupported task: {task}. Supported tasks are 'pd', 'uf', 'hp'.")
+        if task not in ['pd', 'pv', 'hp']:
+            raise ValueError(f"Unsupported task: {task}. Supported tasks are 'pd', 'pv', 'hp'.")
 
         args.logger.info(f"Evaluating on downstream task: {task}")
 
@@ -177,19 +208,24 @@ class Evaluator:
             # Check if embeddings are not a numpy array, then transfer to CPU
             if not isinstance(embs['x'], np.ndarray) and hasattr(embs['x'], 'device'):
                 embs['x'] = embs['x'].cpu()
-            x_train, y_train, x_test, y_test = self.load_downstream_task_data(embs=embs['x'], 
-                                                                            path=args.dt_load_path, 
+            
+            if task == 'hp':
+                path = f"{args.dt_load_path}/Zip_zhvi_uc_sfrcondo_tier_0.33_0.67_sm_sa_month.csv"
+            elif task == 'pd':
+                path = f"{args.dt_load_path}/zcta_pd.csv"
+            elif task == 'pv':
+                path = f"{args.dt_load_path}/zcta_pv.csv"
+            x_train, y_train, train_region_ids, x_test, y_test, test_region_ids = self.load_downstream_task_data(embs=embs['x'], 
+                                                                            path=path, 
                                                                             region_ids=region_ids, 
                                                                             task=task)
             
             
-            data = [x_train, y_train, x_test, y_test]
+            data = [x_train, y_train, train_region_ids, x_test, y_test, test_region_ids]
             # train and evaluate the ML model on the downstream task data
-            metrics_dict = self.fit_with_val(data, dt_model=args.dt_model, verbose=verbose, eval_idx=i)
+            metrics_dict, abs_error_dict= self.fit_with_val(data, dt_model=args.dt_model, verbose=verbose, eval_idx=i)
             for key in metrics_dict:
                 res[key].append(metrics_dict[key])  
-        
-
 
         # compute mean and std for each metric
         for key in res:
@@ -198,9 +234,9 @@ class Evaluator:
         
         
         # Log and return mean and std of results
-        args.logger.info(f'Test RMSE: {res["rmse"][0]:.2f} +/- {res["rmse"][1]:.2f}'
-                 f' | Test MAE: {res["mae"][0]:.2f} +/- {res["mae"][1]:.2f}'
-                 f' | Test R2: {res["r2"][0]:.2f} +/- {res["r2"][1]:.2f}'
+        args.logger.info(f'Test RMSE: {res["rmse"][0]:.4f} +/- {res["rmse"][1]:.4f}'
+                 f' | Test MAE: {res["mae"][0]:.4f} +/- {res["mae"][1]:.4f}'
+                 f' | Test R2: {res["r2"][0]:.4f} +/- {res["r2"][1]:.4f}'
         )
 
         return res

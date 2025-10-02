@@ -59,19 +59,19 @@ class HGI:
     def train(self):
         args = self.args
         
-        print(f"Start training region embeddings for the city of {args.city}")
+        print(f"Start training region embeddings for the state of {args.state}")
         lowest_loss = math.inf
         region_emb_to_save = torch.FloatTensor(0)
         for epoch in range(1, args.epochs + 1):
             loss, region_emb_ids = self.train_epoch()
-            if epoch % 2 == 0 or epoch == 1 or epoch == args.epochs:
+            if epoch % 20 == 0 or epoch == 1 or epoch == args.epochs:
                 args.logger.info(f"Epoch {epoch}/{args.epochs} - Loss: {loss:.4f}")
             if loss < lowest_loss:
             # Save the embeddings with the lowest loss
                 region_emb_to_save = self.model.get_region_emb()
                 lowest_loss = loss
 
-        print(f"Finished training region embeddings for {args.city} with lowest loss: {lowest_loss:.4f}")
+        print(f"Finished training region embeddings for {args.state} with lowest loss: {lowest_loss:.4f}")
 
         return region_emb_to_save, region_emb_ids
     
@@ -89,7 +89,7 @@ class HGI:
                 f"=== Finished generating trained region embeddings in {end_total - start_total:.2f} sec ==="
             )
         
-        print(f"Total number of generated regions in {args.city}: {region_emb.size(0)}")
+        print(f"Total number of generated regions in {args.state}: {region_emb.size(0)}")
         
         # Save both region embeddings and region IDs in a dictionary
     
@@ -99,8 +99,8 @@ class HGI:
         }
 
         if save_path is not None:
-            save_path = f"../checkpoints/hgi_{args.city}_region_embs.pt"
+            save_path = f"../checkpoints/hgi/{args.state}_region_embs.pt"
             torch.save(save_obj, save_path)
-            print(f"Region embeddings of {args.city} has been save to {save_path}")
+            print(f"Region embeddings of {args.state} has been save to {save_path}")
 
         return save_obj

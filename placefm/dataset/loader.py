@@ -17,27 +17,44 @@ from torch_sparse import SparseTensor
 import shutil
 
 from placefm.dataset.f_osm import F_OSM
+from placefm.dataset.fsq import FSQ
 from placefm.dataset.convertor import ei2csr, csr2ei
 from placefm.dataset.utils import splits
 from placefm.utils import index_to_mask, to_tensor
 
 
-def get_dataset(name='f-osm', args=None, load_path='../data'):
+def get_dataset(name='fsq', args=None, load_path='../data'):
     path = osp.join(load_path)
     # Create a dictionary that maps standard names to normalized names
-    standard_names = ['f-osm']
+    standard_names = ['fsq']
     normalized_names = [name.lower().replace('-', '').replace('_', '') for name in standard_names]
     name_dict = dict(zip(normalized_names, standard_names))
 
     # Normalize the name input
     normalized_name = name.lower().replace('-', '').replace('_', '')
+    
+    # Load US state abbreviations
+    state_abbreviations_path = osp.join(args.load_path, f'{name}/raw/us_state_abbreviations.json')
+    if not osp.exists(state_abbreviations_path):
+        raise FileNotFoundError(f"State abbreviations file not found at {state_abbreviations_path}")
+        
+    with open(state_abbreviations_path, 'r') as f:
+        us_state_abbreviations = json.load(f)
+
+    # Check if the state is valid
+    if args.state.upper() not in us_state_abbreviations:
+        print(f"Warning: The state '{args.state}' is not a valid US state abbreviation.")
+
 
     if normalized_name in name_dict:
         name = name_dict[normalized_name]  # Transfer to standard name
         if name in ['f-osm']:
-            dataset = F_OSM(root=path, name=name, args=args)            
+            dataset = F_OSM(root=path, name=name, args=args)
+        elif name in ['fsq']:
+            dataset = FSQ(root=path, name=name, args=args)
     else:
         raise ValueError("Dataset name not recognized.")
+    
 
     try:
         data = dataset[0]
@@ -46,11 +63,11 @@ def get_dataset(name='f-osm', args=None, load_path='../data'):
         data = dataset
         
     # pyg2TransAndInd: add splits
-    data = splits(data, args.split)
+    # data = splits(data, args.split)
     data = TransAndInd(data, name)
     data = data.to(args.device)
 
-    if name in ['f-osm']:
+    if name in ['f-osm', 'fsq']:
         data.nclass = len(torch.unique(data.labels_full)) # number of unique postcodes
         # data.nclass = 49 # number of states in US.
     else:
@@ -59,8 +76,8 @@ def get_dataset(name='f-osm', args=None, load_path='../data'):
         except:
             data.nclass = data.num_classes
 
-    print(f"total # POIs found in {args.city} graph:", data.x.shape[0])
-    print(f"total # of regions found in {args.city}: ", len(data.y.unique()))
+    print(f"total # POIs found in {args.state} graph:", data.x.shape[0])
+    print(f"total # of regions found in {args.state}: ", len(data.y.unique()))
 
     # print("train nodes num:", sum(data.train_mask).item())
     # print("val nodes num:", sum(data.val_mask).item())
@@ -132,7 +149,7 @@ class TransAndInd:
             self.y = data.y
             self.feat_full = data.x
             self.labels_full = data.y
-            self.adj_full = ei2csr(data.edge_index, data.x.shape[0])
+            self.adj_full = ei2csr(data.edge_index, data.x.shape[0], edge_weight=data.edge_weight)
             self.edge_index = data.edge_index
             self.edge_weight = data.edge_weight
             self.region_adjacency = data.region_adjacency if hasattr(data, 'region_adjacency') else None
@@ -210,69 +227,6 @@ class LargeDataLoader(nn.Module):
     def __init__(self, name='Flickr', split='train', batch_size=200, split_method='kmeans'):
         super(LargeDataLoader, self).__init__()
         path = osp.join('../../data')
-        if name in ['ogbn-arxiv']:
-            dataset = DataGraphSAINT(root=path, dataset=name)
-            dataset.num_classes = 40
-            data = dataset[0]
-            self.n, self.dim = data.feat_full.shape
-            labels = data.labels_full
-            features = to_tensor(data.feat_full)
-            edge_index = csr2ei(data.adj_full)
-            values = torch.ones(edge_index.shape[1])
-            Adj = torch.sparse_coo_tensor(edge_index, values, torch.Size([self.n, self.n]))
-            sparse_eye = torch.sparse_coo_tensor(torch.arange(self.n).repeat(2, 1), torch.ones(self.n),
-                                                 (self.n, self.n))
-            self.Adj = Adj + sparse_eye
-
-            features = self.normalize_data(features)
-            features = self.GCF(self.Adj, features, k=1)
-
-            self.split_idx = torch.tensor(data.idx_train)
-            self.n_split = len(self.split_idx)
-            self.k = torch.round(torch.tensor(self.n_split / batch_size)).to(torch.int)
-            self.split_feat = features[self.split_idx]
-            self.split_label = labels[self.split_idx]
-
-            self.split_method = split_method
-            self.n_classes = dataset.num_classes
-        else:
-            if name == 'flickr':
-                from torch_geometric.datasets import Flickr as DataSet
-            elif name == 'reddit':
-                from torch_geometric.datasets import Reddit2 as DataSet
-
-            Dataset = DataSet(root=path + f'/{name}')
-            self.n, self.dim = Dataset[0].x.shape
-            mask = split + '_mask'
-            features = Dataset[0].x
-            labels = Dataset[0].y
-            edge_index = Dataset[0].edge_index
-
-            values = torch.ones(edge_index.shape[1])
-            Adj = torch.sparse_coo_tensor(edge_index, values, torch.Size([self.n, self.n]))
-            sparse_eye = torch.sparse_coo_tensor(torch.arange(self.n).repeat(2, 1), torch.ones(self.n),
-                                                 (self.n, self.n))
-            self.Adj = Adj + sparse_eye
-            features = self.normalize_data(features)
-            # features      = self.GCF(self.Adj, features, k=2)
-            self.split_idx = torch.where(Dataset[0][mask])[0]
-            self.n_split = len(self.split_idx)
-            self.k = torch.round(torch.tensor(self.n_split / batch_size)).to(torch.int)
-
-            # Masked Adjacency Matrix
-            optor_index = torch.cat(
-                (self.split_idx.reshape(1, self.n_split), torch.tensor(range(self.n_split)).reshape(1, self.n_split)),
-                dim=0)
-            optor_value = torch.ones(self.n_split)
-            optor_shape = torch.Size([self.n, self.n_split])
-            optor = torch.sparse_coo_tensor(optor_index, optor_value, optor_shape)
-            self.Adj_mask = torch.sparse.mm(torch.sparse.mm(optor.t(), self.Adj), optor)
-            self.split_feat = features[self.split_idx]
-            # self.split_feat   = self.GCF(self.Adj_mask, self.split_feat, k = 2)
-
-            self.split_label = labels[self.split_idx]
-            self.split_method = split_method
-            self.n_classes = Dataset.num_classes
 
     def normalize_data(self, data):
         """
@@ -326,7 +280,7 @@ class LargeDataLoader(nn.Module):
 
     def getitem(self, idx):
         """
-        对于给定的 idx 输出对应的 node_features, labels, sub Ajacency matrix
+         node_features, labels, sub Ajacency matrix
         """
         # idx   = [idx]
         n_idx = len(idx)
@@ -348,10 +302,6 @@ class LargeDataLoader(nn.Module):
         batch_i = self.getitem(idx)
         return batch_i
 
-
-class OgbDataLoader(nn.Module):
-    def __init__(self, dataset_name='ogbn-arxiv', split='train', batch_size=5000, split_method='kmeans'):
-        super(OgbDataLoader, self).__init__()
 
 
 class DataGraphSAINT:

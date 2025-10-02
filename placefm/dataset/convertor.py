@@ -66,10 +66,13 @@ def csr2ei(adjacency_matrix_csr):
     edge_index = torch.tensor(np.vstack([adjacency_matrix_coo.row, adjacency_matrix_coo.col]), dtype=torch.long)
     return edge_index
 
-
-def ei2csr(edge_index, num_nodes):
+def ei2csr(edge_index, num_nodes, edge_weight=None):
     edge_index = edge_index.numpy()
-    scoo = coo_matrix((np.ones_like(edge_index[0]), (edge_index[0], edge_index[1])), shape=(num_nodes, num_nodes))
+    if edge_weight is None:
+        edge_weight = np.ones_like(edge_index[0])
+    else:
+        edge_weight = edge_weight.numpy()
+    scoo = coo_matrix((edge_weight, (edge_index[0], edge_index[1])), shape=(num_nodes, num_nodes))
     adjacency_matrix_csr = scoo.tocsr()
     return adjacency_matrix_csr
 

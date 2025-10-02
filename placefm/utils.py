@@ -2,6 +2,7 @@ import random
 
 import os
 import numpy as np
+from shapely.geometry import Point
 import torch
 import torch.nn.functional as F
 import torch.sparse as ts
@@ -16,6 +17,20 @@ from torch_geometric.utils import add_remaining_self_loops
 from torch_geometric.utils.num_nodes import maybe_num_nodes
 from torch_scatter import scatter_add
 import scipy.sparse as sp
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+from scipy.spatial import Voronoi
+from shapely.geometry import Polygon, MultiPolygon
+from shapely.ops import clip_by_rect
+from collections import Counter
+import folium
+import geopandas as gpd
+from geovoronoi import voronoi_regions_from_coords
+import seaborn as sns
+from matplotlib.colors import ListedColormap
+from matplotlib.patches import Patch
+
+
 @torch.jit._overload
 def gcn_norm(edge_index, edge_weight=None, num_nodes=None, improved=False,
              add_self_loops=True, flow="source_to_target", dtype=None):
@@ -447,6 +462,9 @@ def degree_normalize_sparse_tensor(adj, fill_value=1):
 
     row, col = edge_index
     from torch_scatter import scatter_add
+
+
+
     deg = scatter_add(edge_weight, row, dim=0, dim_size=num_nodes)
     deg_inv_sqrt = deg.pow(-1)
     deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
@@ -1022,3 +1040,829 @@ def estimate_eps(X, min_samples=5):
     # plt.close()
 
     return eps
+
+
+def filter_pois_for_visualization(feats, lat_lon, categories, cluster_ids, edge_index):
+    distances = torch.cdist(lat_lon, lat_lon, p=2)  # Compute pairwise distances
+    mean_distances = distances.mean(dim=1)  # Compute mean distance for each POI
+    threshold = mean_distances.mean() + 2 * mean_distances.std()  # Define a threshold (mean + 2*std)
+    valid_pois_mask = mean_distances <= threshold  # Mask for valid POIs
+    lat_lon = lat_lon[valid_pois_mask]
+    print(f"VISUALIZATION: Filtered {len(feats) - valid_pois_mask.sum().item()} out of {len(feats)} POIs")
+    feats = feats[valid_pois_mask]
+    categories = [categories[i] for i in range(len(categories)) if valid_pois_mask[i]]
+    cluster_ids = cluster_ids[valid_pois_mask]
+    # Remove edges from edge_index related to filtered POIs
+    valid_indices = torch.nonzero(valid_pois_mask).squeeze()
+    index_map = {old_idx.item(): new_idx for new_idx, old_idx in enumerate(valid_indices)}
+    filtered_edges = []
+    for edge in edge_index.T:
+        if edge[0].item() in index_map and edge[1].item() in index_map:
+            filtered_edges.append([index_map[edge[0].item()], index_map[edge[1].item()]])
+    # Keep only edges that were NOT filtered out
+    filtered_edges_set = set(tuple(edge) for edge in filtered_edges)
+    all_edges = [tuple(edge.tolist()) for edge in edge_index.T]
+    remaining_edges = [edge for edge in all_edges if edge not in filtered_edges_set]
+    edge_index = torch.tensor(remaining_edges, dtype=torch.long).T
+
+    return feats, lat_lon, categories, cluster_ids, edge_index
+
+
+def plot_tsne_pois(args, feats, categories, cluster_ids, region_id):
+
+    
+
+
+    feats_np = feats.cpu().numpy()
+    tsne = TSNE(n_components=2, random_state=args.seed)
+    feats_2d = tsne.fit_transform(feats_np)
+
+    # Plot the clustering results
+    plt.figure(figsize=(10, 8))
+    # feats_2d = feats_np[:, :2]  # Assuming the first two dimensions for 2D visualization
+
+    unique_labels = set(cluster_ids)
+    # Plot clusters
+    for label in unique_labels:
+        cluster_points = feats_2d[cluster_ids == label]
+        plt.scatter(cluster_points[:, 0], cluster_points[:, 1], label=f'Cluster {label}', alpha=0.7)
+
+    # Highlight centroids
+    centroids_2d = np.array([feats_2d[cluster_ids == label].mean(axis=0) for label in unique_labels if label != -1])
+    plt.scatter(centroids_2d[:, 0], centroids_2d[:, 1], c='red', marker='x', s=100, label='Centroids')
+    # Annotate each point with its category
+    for i, (x, y) in enumerate(feats_2d):
+        # annotation = f"{i}: {str(categories[i]).split('>')[-1]}"
+        annotation = f"{i}"
+        plt.text(x, y, annotation, fontsize=8, ha='center', va='center')
+
+    plt.title(f't-SNE Clustering Results for region {region_id}')
+    plt.legend()
+    plt.grid(True)
+
+    # Save the figure
+    if os.path.exists(f"../checkpoints/logs/placefm/{args.state}") is False:
+        os.mkdir(f"../checkpoints/logs/placefm/{args.state}")
+    save_path = f"../checkpoints/logs/placefm/{args.state}/tsne_region_{region_id}_{args.clustering_method}.png"
+    plt.savefig(save_path)
+    plt.close()
+
+def voronoi_finite_polygons_2d(vor, radius=None):
+    """
+    Reconstruct finite Voronoi regions.
+    Source: https://stackoverflow.com/a/20678647
+    """
+    if vor.points.shape[1] != 2:
+        raise ValueError("Requires 2D input")
+
+    new_regions = []
+    new_vertices = vor.vertices.tolist()
+
+    center = vor.points.mean(axis=0)
+    if radius is None:
+        radius = np.ptp(vor.points, axis=0).max()*2
+
+    # Construct a map of ridges for each point
+    all_ridges = {}
+    for (p1, p2), (v1, v2) in zip(vor.ridge_points, vor.ridge_vertices):
+        all_ridges.setdefault(int(p1), []).append((int(p2), v1, v2))
+        all_ridges.setdefault(int(p2), []).append((int(p1), v1, v2))
+
+    # Reconstruct infinite regions
+    for p1, region in enumerate(vor.point_region):
+        vertices = vor.regions[region]
+
+        if all(v >= 0 for v in vertices):
+            # finite region
+            new_regions.append(vertices)
+            continue
+
+        # reconstruct a non-finite region
+        if p1 not in all_ridges:
+            new_regions.append([v for v in vertices if v >= 0])
+            continue
+
+        ridges = all_ridges[p1]
+        new_region = [v for v in vertices if v >= 0]
+
+        for p2, v1, v2 in ridges:
+            if v2 < 0:
+                v1, v2 = v2, v1
+            if v1 >= 0:
+                continue
+            # Compute the missing endpoint
+            t = vor.points[p2] - vor.points[p1]  # tangent
+            t /= np.linalg.norm(t)
+            n = np.array([-t[1], t[0]])  # normal
+
+            midpoint = vor.points[[p1, p2]].mean(axis=0)
+            direction = np.sign(np.dot(midpoint - center, n)) * n
+            far_point = vor.vertices[v2] + direction * radius
+
+            new_region.append(len(new_vertices))
+            new_vertices.append(far_point.tolist())
+
+        new_regions.append(new_region)
+
+    return new_regions, np.asarray(new_vertices)
+
+
+def plot_spatial_pois(args, lat_lon, categories, edge_index, cluster_ids, region_id):
+    
+
+    plt.figure(figsize=(25, 22))
+    longitudes = lat_lon[:, 1]  
+    latitudes = lat_lon[:, 0]   
+
+    # Create Voronoi diagram
+    points = np.vstack([longitudes, latitudes]).T
+    vor = Voronoi(points)
+    regions, vertices = voronoi_finite_polygons_2d(vor)
+    
+
+    # Bounding box (clip polygons here)
+    min_x, max_x = longitudes.min().item(), longitudes.max().item()
+    min_y, max_y = latitudes.min().item(), latitudes.max().item()
+
+    # Generate distinct colors per cluster
+    unique_cluster_ids = set(cluster_ids)
+    color_palette = plt.cm.get_cmap('hsv', len(unique_cluster_ids))  # HSV ensures distinct colors for many clusters
+
+    colors = {cid: color_palette(i) for i, cid in enumerate(unique_cluster_ids)}
+
+    # Scatter POIs
+    for idx in range(len(regions)):
+        region = regions[idx]
+        cid = cluster_ids[idx] 
+
+        polygon = vertices[region]
+        poly = Polygon(polygon)
+        poly = clip_by_rect(poly, min_x, min_y, max_x, max_y)
+        if isinstance(poly, MultiPolygon):
+            print(f"region {idx} is a MultiPolygon, skipping visualization for this region.")
+            # poly = max(poly.geoms, key=lambda p: p.area)  # Select the largest polygon
+            continue
+        
+        x, y = poly.exterior.xy
+
+        # Check for overlapping regions
+        for j in range(len(regions)):
+            other_region = regions[j]
+            other_polygon = vertices[other_region]
+            other_poly = Polygon(other_polygon)
+
+            overlap = False
+            if j != idx:
+                poly = poly.buffer(0)  # Attempt to fix invalid geometry
+                other_poly = other_poly.buffer(0)  # Attempt to fix invalid geometry
+                if poly.is_valid and other_poly.is_valid and poly.intersection(other_poly).area > 0.0:
+                    overlap = True
+                    print(f"Overlap detected between region {idx} and region {j}")
+        if overlap is False:
+            plt.fill(x, y, alpha=0.3, color=colors[cid], edgecolor=colors[cid], linewidth=0.0)
+
+            # Plot the corresponding POI for this region
+            plt.scatter(longitudes[idx], latitudes[idx], c=[colors[cid]], s=20, alpha=1.0)
+
+    
+
+    # Annotate each POI
+    for i in range(len(lat_lon)):
+        annotation = f"{i}: {str(categories[i]).split('>')[-1]}"
+        plt.text(longitudes[i], latitudes[i], annotation, fontsize=8,
+                 ha='center', va='center')
+
+    # Plot edges if provided
+    if edge_index is not None:
+        for edge in edge_index.T:
+            start, end = edge
+            plt.plot(
+                [longitudes[start], longitudes[end]],
+                [latitudes[start], latitudes[end]],
+                color='gray', alpha=0.5, linewidth=0.5
+            )
+
+    plt.title(f'Voronoi Clustered Regions for region {region_id} clustered into {len(unique_cluster_ids)} places')
+    plt.xlabel('Longitude')
+    plt.ylabel('Latitude')
+    plt.xlim(vor.min_bound[0], vor.max_bound[0])
+    plt.ylim(vor.min_bound[1], vor.max_bound[1])
+    plt.grid(True)
+
+    # Save
+    save_dir = f"../checkpoints/logs/placefm/{args.state}"
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = f"{save_dir}/voronoi_region_{region_id}_{args.clustering_method}.png"
+    plt.savefig(save_path)
+    plt.close()
+
+
+def voronoi_finite_polygons_2d(vor, radius=None):
+    """
+    Reconstruct finite Voronoi regions.
+    Source: https://stackoverflow.com/a/20678647
+    """
+    if vor.points.shape[1] != 2:
+        raise ValueError("Requires 2D input")
+
+    new_regions = []
+    new_vertices = vor.vertices.tolist()
+
+    center = vor.points.mean(axis=0)
+    if radius is None:
+        radius = np.ptp(vor.points, axis=0).max()*2
+
+    # Construct a map of ridges for each point
+    all_ridges = {}
+    for (p1, p2), (v1, v2) in zip(vor.ridge_points, vor.ridge_vertices):
+        all_ridges.setdefault(int(p1), []).append((int(p2), v1, v2))
+        all_ridges.setdefault(int(p2), []).append((int(p1), v1, v2))
+
+    # Reconstruct infinite regions
+    for p1, region in enumerate(vor.point_region):
+        vertices = vor.regions[region]
+
+        if all(v >= 0 for v in vertices):
+            # finite region
+            new_regions.append(vertices)
+            continue
+
+        # reconstruct a non-finite region
+        if p1 not in all_ridges:
+            new_regions.append([v for v in vertices if v >= 0])
+            continue
+
+        ridges = all_ridges[p1]
+        new_region = [v for v in vertices if v >= 0]
+
+        for p2, v1, v2 in ridges:
+            if v2 < 0:
+                v1, v2 = v2, v1
+            if v1 >= 0:
+                continue
+            # Compute the missing endpoint
+            t = vor.points[p2] - vor.points[p1]  # tangent
+            t /= np.linalg.norm(t)
+            n = np.array([-t[1], t[0]])  # normal
+
+            midpoint = vor.points[[p1, p2]].mean(axis=0)
+            direction = np.sign(np.dot(midpoint - center, n)) * n
+            far_point = vor.vertices[v2] + direction * radius
+
+            new_region.append(len(new_vertices))
+            new_vertices.append(far_point.tolist())
+
+        new_regions.append(new_region)
+
+    return new_regions, np.asarray(new_vertices)
+
+
+def plot_spatial_pois_folium(args, lat_lon, categories, edge_index, edge_weight, cluster_ids, region_id, cluster_color_map):
+    """
+    Interactive Folium map version of Voronoi POI plotting.
+    """
+
+    
+
+    longitudes = lat_lon[:, 1]
+    latitudes = lat_lon[:, 0]
+
+    # Initialize folium map
+    center_lat, center_lon = latitudes.mean().item(), longitudes.mean().item()
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles='CartoDB positron', control_scale=True)
+    
+    region_zip = str(region_id)
+
+    points = np.vstack([longitudes, latitudes]).T
+    # vor = Voronoi(points)
+    # regions, vertices = voronoi_finite_polygons_2d(vor)
+
+    # Bounding box (clip polygons here)
+    # min_x, max_x = longitudes.min().item(), longitudes.max().item()
+    # min_y, max_y = latitudes.min().item(), latitudes.max().item()
+
+
+    # US Census Bureau TIGER/Line Shapefiles for ZIP Code Tabulation Areas (ZCTA)
+    # Direct URL to GeoJSON (for 2020): https://www2.census.gov/geo/tiger/TIGER2020/ZCTA5/tl_2020_us_zcta520.geojson
+    shapefile_path = "../data/fsq/Census/tl_2024_us_zcta520/tl_2024_us_zcta520.shp"
+    gdf = gpd.read_file(shapefile_path)
+    region_gdf = gdf[gdf['ZCTA5CE20'] == region_zip]
+    if not region_gdf.empty:
+        for _, row in region_gdf.iterrows():
+            boundary = row.geometry
+            if boundary.geom_type == 'Polygon':
+                coords = [(y, x) for x, y in boundary.exterior.coords]
+                folium.PolyLine(
+                    locations=coords,
+                    color='red',
+                    weight=3,
+                    opacity=0.8,
+                    dash_array='10,5',
+                    tooltip=f'Zipcode {region_zip} Boundary'
+                ).add_to(m)
+            elif boundary.geom_type == 'MultiPolygon':
+                for poly in boundary.geoms:
+                    coords = [(y, x) for x, y in poly.exterior.coords]
+                    folium.PolyLine(
+                        locations=coords,
+                        color='red',
+                        weight=3,
+                        opacity=0.8,
+                        dash_array='10,5',
+                        tooltip=f'Zipcode {region_zip} Boundary'
+                    ).add_to(m)
+    else:
+        print(f"Zipcode {region_zip} not found in census data.")
+
+
+    # filter out points outside the boundary
+    boundary = region_gdf.geometry.values[0]
+    filtered_points = []
+    filtered_lat_lon = []
+    filtered_cluster_ids = []
+    filtered_categories = []
+    kept_indices = []
+    for i in range(len(lat_lon)):
+        pt = Point(torch.tensor([lat_lon[i][1], lat_lon[i][0]]))
+        if boundary.contains(pt):
+            filtered_points.append(points[i])
+            filtered_lat_lon.append(lat_lon[i])
+            filtered_cluster_ids.append(cluster_ids[i])
+            filtered_categories.append(categories[i])
+            kept_indices.append(i)
+            
+    
+            
+    points = np.array(filtered_points)
+    lat_lon = np.array(filtered_lat_lon)
+    cluster_ids = np.array(filtered_cluster_ids)
+    categories = np.array(filtered_categories)
+    latitudes = lat_lon[:, 0]
+    longitudes = lat_lon[:, 1]
+
+    # Extract edges inside the the region
+    region_edge_index = []
+
+    poi_idx_map = {old_idx: new_idx for new_idx, old_idx in enumerate(kept_indices)}
+    # Mask for edges where both src and dst are in idx
+    src_nodes = edge_index[0]
+    dst_nodes = edge_index[1]
+    idx_set = set(kept_indices)
+    mask = torch.tensor([(src.item() in idx_set and dst.item() in idx_set) for src, dst in zip(src_nodes, dst_nodes)], dtype=torch.bool)
+
+    # Filter edges
+    filtered_src = src_nodes[mask]
+    filtered_dst = dst_nodes[mask]
+    region_edge_weight = edge_weight[mask]
+
+    # Map old indices to new indices
+    mapped_src = torch.tensor([poi_idx_map[src.item()] for src in filtered_src], dtype=torch.long)
+    mapped_dst = torch.tensor([poi_idx_map[dst.item()] for dst in filtered_dst], dtype=torch.long)
+
+    region_edge_index = torch.stack([mapped_src, mapped_dst], dim=0)
+
+    # region_edge_index = torch.tensor(region_edge_index, dtype=torch.long).t().contiguous()
+
+
+    print(f"After filtering, {len(points)} POIs remain within zipcode {region_zip}")
+
+
+    # Create Voronoi diagram
+    regions, region_pts = voronoi_regions_from_coords(points, boundary)
+
+
+    # Generate distinct colors per cluster
+    # unique_cluster_ids = set(cluster_ids)
+    # color_palette = plt.cm.get_cmap('hsv', len(unique_cluster_ids))
+    # colors = {cid: f"rgba({int(255*r)}, {int(255*g)}, {int(255*b)}, 0.5)"
+    #           for cid, (r, g, b, _) in zip(unique_cluster_ids, color_palette(range(len(unique_cluster_ids))))}
+    colors = cluster_color_map
+    colors = {cid: f"rgba({int(255*r)}, {int(255*g)}, {int(255*b)}, 0.5)"
+              for cid, (r, g, b) in cluster_color_map.items()}
+    
+
+    # Add Voronoi polygons
+    # Calculate the cluster sizes
+    cluster_sizes = Counter(cluster_ids)
+
+    # Get the top 5 clusters with the most members
+    top_clusters = cluster_sizes.most_common(10)
+    top_cids = [cid for cid, _ in top_clusters]
+
+    print(f"Top 5 clusters with the most members: {top_clusters}")
+    for idx in range(len(regions)):
+        region_pt = region_pts[idx]
+        poly = regions[idx]
+        cid = cluster_ids[region_pt[0]]
+        if cid not in top_cids:
+            continue  
+        if isinstance(poly, MultiPolygon):
+            for sub_poly in poly.geoms:
+                folium.Polygon(
+                    locations=[(y, x) for x, y in sub_poly.exterior.coords],
+                    color=colors[cid],
+                    fill=True,
+                    fill_color=colors[cid],
+                    fill_opacity=0.8,
+                    weight=0,
+                ).add_to(m)
+
+        elif isinstance(poly, Polygon):
+            folium.Polygon(
+                locations=[(y, x) for x, y in poly.exterior.coords],
+                color=colors[cid],
+                fill=True,
+                fill_color=colors[cid],
+                fill_opacity=0.8,
+                weight=0,
+            ).add_to(m)
+
+        
+    # Plot POIs as markers
+    for idx in range(len(lat_lon)):
+
+
+        url = "/scratch/mhashe4/repos/PlaceFM/placefm/plots/icons/{}".format
+        if categories[idx] is not None and str(categories[idx]) != 'nan':
+            category = str(categories[idx]).split('>')[0].strip().lower()
+            if category == "community and government":
+                icon = "government"
+            elif category == "Business and professional services".lower():
+                icon = "briefcase"
+            elif category == "Retail".lower():
+                icon = "shopping-cart"
+            elif category == "Dining and drinking".lower():
+                icon = "food"
+            elif category == "arts and entertainment".lower():
+                icon = "art"
+            elif category == "landmarks and outdoors".lower():
+                icon = "star"
+            elif category == "Sports and recreation".lower():
+                icon = "gym"
+            elif category == "health and medicine".lower():
+                icon = "heart"
+            elif category == "travel and transportation".lower():
+                icon = "bus"
+            elif category == "event".lower():
+                icon = "event"
+            else:
+                icon = category.replace(' ', '_').replace('/', '_')
+            icon_url = url(f"{icon}.png")
+
+        
+        if cluster_ids[idx] in top_cids:
+            icon = folium.CustomIcon(
+                icon_url,
+                icon_size=(20, 20),
+            )
+
+            folium.Marker(
+                location=(latitudes[idx], longitudes[idx]),
+                radius=3,
+                color=colors[cluster_ids[idx]],
+                fill=True,
+                fill_color=colors[cluster_ids[idx]],
+                fill_opacity=0.5,
+                tooltip=f"POI {idx}: {str(categories[idx])} [Place {cluster_ids[idx]}]",
+                icon=icon
+            ).add_to(m)
+
+
+
+
+    # Add edges if provided
+    # Normalize edge weights to be scaled to (0, 1)
+    if region_edge_weight is not None:
+        min_weight = region_edge_weight.min()
+        max_weight = region_edge_weight.max()
+        region_edge_weight = (region_edge_weight - min_weight) / (max_weight - min_weight + 1e-8)
+
+    # Remove edges with weights below the threshold
+    # weight_threshold = 0.4  # Define your threshold here
+    # valid_edge_mask = region_edge_weight >= weight_threshold
+    # region_edge_index = region_edge_index[:, valid_edge_mask]
+    # valid_edge_mask = valid_edge_mask.to(region_edge_weight.device)
+    # region_edge_weight = region_edge_weight[valid_edge_mask]
+
+    if region_edge_index is not None:
+        for i, edge in enumerate(region_edge_index.T):
+            start, end = edge
+            folium.PolyLine(
+                locations=[
+                    (latitudes[start], longitudes[start]),
+                    (latitudes[end], longitudes[end])
+                ],
+                color="gray",
+                weight=region_edge_weight[i].item(),
+                opacity=region_edge_weight[i].item(),
+                # tooltip=f"Weight: {region_edge_weight[i].item():.4f}"
+            ).add_to(m)
+
+    # Save interactive map
+    save_dir = f"../checkpoints/logs/placefm/{args.state}/figs/"
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = f"{save_dir}/voronoi_region_{region_id}_{args.clustering_method}_g{args.placefm_agg_gamma}_a{args.placefm_agg_alpha}_b{args.placefm_agg_beta}_rr{args.placefm_kmeans_reduction_ratio}_prop{~args.no_prop}.html"
+    m.save(save_path)
+
+    print(f"Interactive map saved to {save_path}")
+
+
+
+def plot_spatial_pois(args, lat_lon, categories, edge_index, cluster_ids, region_id):
+    
+
+    plt.figure(figsize=(25, 22))
+    longitudes = lat_lon[:, 1]  
+    latitudes = lat_lon[:, 0]   
+
+    # Create Voronoi diagram
+    points = np.vstack([longitudes, latitudes]).T
+    vor = Voronoi(points)
+    regions, vertices = voronoi_finite_polygons_2d(vor)
+    
+
+    # Bounding box (clip polygons here)
+    min_x, max_x = longitudes.min().item(), longitudes.max().item()
+    min_y, max_y = latitudes.min().item(), latitudes.max().item()
+
+    # Generate distinct colors per cluster
+    unique_cluster_ids = set(cluster_ids)
+    color_palette = plt.cm.get_cmap('hsv', len(unique_cluster_ids))  # HSV ensures distinct colors for many clusters
+
+    colors = {cid: color_palette(i) for i, cid in enumerate(unique_cluster_ids)}
+
+    # Scatter POIs
+    for idx in range(len(regions)):
+        region = regions[idx]
+        cid = cluster_ids[idx] 
+
+        polygon = vertices[region]
+        poly = Polygon(polygon)
+        poly = clip_by_rect(poly, min_x, min_y, max_x, max_y)
+        if isinstance(poly, MultiPolygon):
+            print(f"region {idx} is a MultiPolygon, skipping visualization for this region.")
+            # poly = max(poly.geoms, key=lambda p: p.area)  # Select the largest polygon
+            continue
+        
+        x, y = poly.exterior.xy
+
+        # Check for overlapping regions
+        for j in range(len(regions)):
+            other_region = regions[j]
+            other_polygon = vertices[other_region]
+            other_poly = Polygon(other_polygon)
+
+            overlap = False
+            if j != idx:
+                poly = poly.buffer(0)  # Attempt to fix invalid geometry
+                other_poly = other_poly.buffer(0)  # Attempt to fix invalid geometry
+                if poly.is_valid and other_poly.is_valid and poly.intersection(other_poly).area > 0.0:
+                    overlap = True
+                    print(f"Overlap detected between region {idx} and region {j}")
+        if overlap is False:
+            plt.fill(x, y, alpha=0.3, color=colors[cid], edgecolor=colors[cid], linewidth=0.0)
+
+            # Plot the corresponding POI for this region
+            plt.scatter(longitudes[idx], latitudes[idx], c=[colors[cid]], s=20, alpha=1.0)
+
+    
+
+    # Annotate each POI
+    for i in range(len(lat_lon)):
+        annotation = f"{i}: {str(categories[i]).split('>')[-1]}"
+        plt.text(longitudes[i], latitudes[i], annotation, fontsize=8,
+                 ha='center', va='center')
+
+    # Plot edges if provided
+    if edge_index is not None:
+        for edge in edge_index.T:
+            start, end = edge
+            plt.plot(
+                [longitudes[start], longitudes[end]],
+                [latitudes[start], latitudes[end]],
+                color='gray', alpha=0.5, linewidth=0.5
+            )
+
+    plt.title(f'Voronoi Clustered Regions for region {region_id} clustered into {len(unique_cluster_ids)} places')
+    plt.xlabel('Longitude')
+    plt.ylabel('Latitude')
+    plt.xlim(vor.min_bound[0], vor.max_bound[0])
+    plt.ylim(vor.min_bound[1], vor.max_bound[1])
+    plt.grid(True)
+
+    # Save
+    save_dir = f"../checkpoints/logs/placefm/{args.state}"
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = f"{save_dir}/voronoi_region_{region_id}_{args.clustering_method}.png"
+    plt.savefig(save_path)
+    plt.close()
+
+def assign_cluster_colors(feats, categories, cluster_ids, num_colors=8, method='gradient'):
+    """
+    Assigns colors to clusters using either random coloring or gradient coloring based on feature similarity.
+    Also generates a color palette plot with semantic descriptions (top-k common categories per color).
+
+    Args:
+        feats: Tensor of shape [N, D], feature vectors for each point.
+        categories: List or array of category labels for each point.
+        cluster_ids: Array of cluster assignments for each point.
+        num_colors: Number of base colors for gradient coloring.
+        method: 'random' or 'gradient'.
+
+    Returns:
+        cluster_color_map: Dict mapping cluster_id to color (RGB tuple).
+        color_semantics: Dict mapping color index to top-k categories.
+    """
+    import matplotlib.pyplot as plt
+
+    unique_clusters = np.unique(cluster_ids)
+    n_clusters = len(unique_clusters)
+    feats_np = feats.cpu().numpy() if torch.is_tensor(feats) else np.array(feats)
+    cluster_centroids = np.array([feats_np[cluster_ids == cid].mean(axis=0) for cid in unique_clusters])
+
+    if method == 'random':
+        colors = plt.cm.get_cmap('tab20', n_clusters)
+        cluster_color_map = {cid: colors(i % n_clusters)[:3] for i, cid in enumerate(unique_clusters)}
+        color_indices = {cid: i for i, cid in enumerate(unique_clusters)}
+    else:
+        # Gradient coloring: select num_colors base clusters, assign colors, interpolate for others
+        base_indices = np.linspace(0, n_clusters - 1, num_colors, dtype=int)
+        base_cids = unique_clusters[base_indices]
+        color_palette = sns.color_palette('crest', num_colors)
+        # base_colors = [np.array(color_palette(i)[:3]) for i in range(num_colors)]
+        base_colors = color_palette 
+        base_centroids = cluster_centroids[base_indices]
+
+        # Assign each cluster to nearest base centroid, then interpolate color
+        cluster_color_map = {}
+        color_indices = {}
+        for i, cid in enumerate(unique_clusters):
+            dists = np.linalg.norm(base_centroids - cluster_centroids[i], axis=1)
+            closest = np.argmin(dists)
+            # Interpolate color based on distance to closest base centroid
+            interp = 1 - (dists[closest] / (dists.max() + 1e-8))
+            base_color = np.array(base_colors[closest])
+            color = base_color * interp + np.array([1, 1, 1]) * (1 - interp)
+            cluster_color_map[cid] = tuple(color)
+            color_indices[cid] = closest
+
+    # Semantic description: top-k categories per color
+    # k = 5
+    # color_semantics = {}
+    # for color_idx in range(num_colors):
+    #     cids = [cid for cid, idx in color_indices.items() if idx == color_idx]
+    #     cat_list = []
+    #     for cid in cids:
+    #         cat_list.extend(categories[cluster_ids == cid])
+    #     topk = [cat for cat, _ in Counter(cat_list).most_common(k)]
+    #     color_semantics[color_idx] = topk
+
+
+    return cluster_color_map
+
+
+
+
+
+    # plt.figure(figsize=(25, 22))  
+    # longitudes = lat_lon[:, 0]  # Longitude
+    # latitudes = lat_lon[:, 1]  # Latitude
+
+    # unique_labels = np.unique(cluster_ids)
+
+    # # --- Draw each cluster with convex hull ---
+    # for label in unique_labels:
+    #     mask = cluster_ids == label
+    #     cluster_points = lat_lon[mask]
+
+    #     # Plot points of this cluster
+    #     plt.scatter(cluster_points[:, 0], cluster_points[:, 1], alpha=0.7, label=f'Cluster {label}')
+
+    #     Draw convex hull if enough points
+    #     if cluster_points.shape[0] >= 3:
+    #         hull = ConvexHull(cluster_points)
+    #         hull_points = cluster_points[hull.vertices]
+
+    #         # Fill polygon
+    #         plt.fill(hull_points[:, 0], hull_points[:, 1], alpha=0.1)
+
+    #         # Draw hull edges
+    #         for simplex in hull.simplices:
+    #             plt.plot(cluster_points[simplex, 0], cluster_points[simplex, 1], "k-", linewidth=0.1)
+
+        
+
+    
+    # # --- Annotate each point with category ---
+    # for i in range(len(lat_lon)):
+    #     annotation = f"{i}: {str(categories[i]).split('>')[-1]}"
+    #     plt.text(longitudes[i], latitudes[i], annotation, fontsize=8, ha='center', va='center')
+
+    # # --- Plot edges if provided ---
+    # if edge_index is not None:
+    #     for edge in edge_index.T:
+    #         start, end = edge
+    #         plt.plot(
+    #             [longitudes[start], longitudes[end]],
+    #             [latitudes[start], latitudes[end]],
+    #             color='gray', alpha=0.6, linewidth=0.5
+    #         )
+
+    # # --- Formatting ---
+    # plt.title(f'Geographical Clustering Results for region {region_id}')
+    # plt.xlabel('Longitude')
+    # plt.ylabel('Latitude')
+    # plt.legend()
+    # plt.grid(True)
+
+    # # --- Save ---
+    # save_dir = f"../checkpoints/logs/placefm/{args.city}"
+    # os.makedirs(save_dir, exist_ok=True)
+    # geo_save_path = os.path.join(save_dir, f"region_{region_id}.png")
+    # plt.savefig(geo_save_path)
+    # plt.close()
+
+
+def plot_absolute_error(args, state, zipcodes):
+
+    # Load ZIP Code Tabulation Areas (ZCTAs)
+    zcta_shapefile_path = "../data/fsq/Census/tl_2024_us_zcta520/tl_2024_us_zcta520.shp"
+    state_shapefile_path = "/scratch/mhashe4/repos/fm/data/cb_2024_us_state_20m/cb_2024_us_state_20m.shp"
+    
+    gdf_state = gpd.read_file(state_shapefile_path)
+    gdf_state = gdf_state[gdf_state['STUSPS'] == state]
+
+    gdf_zcta = gpd.read_file(zcta_shapefile_path)
+    
+
+
+    
+    region_gdf = gdf_zcta[gdf_zcta['ZCTA5CE20'].isin(zipcodes.keys())]
+
+
+
+    # Generate a random color for each ZIP code and plot
+    fig, ax = plt.subplots(figsize=(10, 10))
+
+    # Plot the state boundary
+    gdf_state.boundary.plot(ax=ax, color='black', linewidth=1)
+
+    # Normalize the values in the zipcodes dictionary to create a gradient
+    values = list(zipcodes.values())
+    min_value = min(values)
+    max_value = max(values)
+
+    # Create 4 groups of darkness based on normalized values
+    thresholds = np.linspace(min_value, max_value, 30)  # 4 groups, 10 thresholds
+    palette = sns.color_palette("rocket", n_colors=5)
+    palette.reverse()
+
+    for _, row in region_gdf.iterrows():
+        value = zipcodes[row['ZCTA5CE20']]
+
+        if thresholds[0] <= value < thresholds[2]:
+            color = palette[0]  # Lightest color
+        elif thresholds[2] <= value < thresholds[8]:
+            color = palette[1]
+        elif thresholds[8] <= value < thresholds[15]:
+            color = palette[2]
+        elif thresholds[15] <= value < thresholds[20]:
+            color = palette[3]
+        else:
+            color = palette[4]    # Darkest color
+        row_geometry = row['geometry']
+        if row_geometry is not None:
+            gpd.GeoSeries([row_geometry]).plot(ax=ax, color=color, edgecolor='black', linewidth=0.5)
+        if row_geometry is not None:
+            gpd.GeoSeries([row_geometry]).plot(ax=ax, color=color, edgecolor='black', linewidth=0.5)
+
+
+    # Add a legend for the color thresholds
+
+    legend_elements = []
+    for i, threshold in enumerate(thresholds):
+        if i in [2, 8, 15, 20, 29]:
+            label = f"<= {thresholds[i] / 1000:.0f}"
+            if i == 2:
+                palette_index = 0
+            elif i == 8:
+                palette_index = 1
+            elif i == 15:
+                palette_index = 2
+            elif i == 20:
+                palette_index = 3       
+            else:
+                palette_index = 4
+            legend_elements.append(Patch(facecolor=palette[palette_index], edgecolor='black', label=label))
+
+    legend_elements.append(Patch(facecolor="white", edgecolor='black', label="No data"))
+
+    plt.legend(handles=legend_elements, title="Absolute Error Ranges", loc="lower right", fontsize=8, title_fontsize=10)
+
+    # Add a title indicating the state
+    plt.title(f"Absolute Error Visualization for ZIP code regions in state: {state}", fontsize=14, fontweight="bold")
+
+
+    plt.axis('off')
+    plt.tight_layout()
+    plt.savefig(f"plots/{args.state}_abs_err.png")  # Save the figure

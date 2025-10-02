@@ -6,6 +6,8 @@ from scipy.spatial import Delaunay
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import OneHotEncoder
 from sentence_transformers import SentenceTransformer
+from rapidfuzz import process
+import us
 
 from placefm.dataset.convertor import *
 from placefm.utils import is_sparse_tensor
@@ -261,7 +263,7 @@ def get_syn_data(data, args, model_type, verbose=False):
     return feat_syn, adj_syn, labels_syn
 
 
-# ---------------  F-OSM data loader utility functions  ------------------
+# ---------------  FSQ data loader utility functions  ------------------
 def calculate_region_areas(unique_postcodes, shapefile_path):
     """
     Calculate the area (in square kilometers) for each region (ZIP code) in unique_postcodes using the provided shapefile.
@@ -320,6 +322,7 @@ def calculate_region_areas(unique_postcodes, shapefile_path):
 
     return area_dict
 
+
 def create_region_adjacency(y, shapefile_path):
     """
     Create adjacency matrix for regions (ZIP codes) based on polygon touching and proximity.
@@ -361,7 +364,7 @@ def create_region_adjacency(y, shapefile_path):
             if poly_i.touches(poly_j):
                 region_adj[i, j] = 1
                 region_adj[j, i] = 1  # undirected
-                print(f"Connected {region_i} <-> {region_j}")
+                # print(f"Connected {region_i} <-> {region_j}")
 
     # If some regions have no neighbors, connect them to the closest region
     isolated = (region_adj.sum(dim=1) == 0).nonzero(as_tuple=True)[0]
@@ -383,28 +386,10 @@ def create_region_adjacency(y, shapefile_path):
             region_adj[min_j, idx] = 1  # undirected
 
 
-    # Sanity check: ensure regions with common border are connected
-    for i, region_i in enumerate(region_labels):
-        poly_i = zip_gdf[zip_gdf['ZCTA5CE20'] == region_i].geometry.values
-        if len(poly_i) == 0:
-            continue
-        poly_i = poly_i[0]
-        for j, region_j in enumerate(region_labels):
-            if i == j:
-                continue
-            poly_j = zip_gdf[zip_gdf['ZCTA5CE20'] == region_j].geometry.values
-            if len(poly_j) == 0:
-                continue
-            poly_j = poly_j[0]
-            if poly_i.touches(poly_j):
-                if region_adj[i, j] != 1:
-                    print(f"Sanity check failed: {region_i} and {region_j} share a border but are not connected in adjacency matrix.")
-
-
     return region_adj
-        
 
-def create_poi_edges(coords, method="knn", k=5, region_labels=None):
+
+def create_poi_edges(coords, method="knn", k=8, region_labels=None):
     """
     Create edges between POIs based on the selected method.
 
@@ -419,7 +404,7 @@ def create_poi_edges(coords, method="knn", k=5, region_labels=None):
     """
     if method == "knn":
         coords_rad = np.radians(coords)
-        nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='ball_tree', metric='haversine')
+        nbrs = NearestNeighbors(n_neighbors=k, algorithm='ball_tree', metric='haversine')
         nbrs.fit(coords_rad)
         _, indices = nbrs.kneighbors(coords_rad)
 
@@ -431,8 +416,9 @@ def create_poi_edges(coords, method="knn", k=5, region_labels=None):
         # Convert to tensor and make undirected
         edge_index = torch.tensor(edge_index, dtype=torch.long).T
         edge_index = torch.cat([edge_index, edge_index.flip(0)], dim=1)
+        edge_weights = torch.ones(edge_index.size(1), dtype=torch.float)
 
-    elif method == "dt":
+    elif method == "dt-local":
         coords = np.array(coords)
         tri = Delaunay(coords)
         
@@ -446,36 +432,140 @@ def create_poi_edges(coords, method="knn", k=5, region_labels=None):
         edge_index = []
         edge_weights = []
 
-        # Compute L = diag length of bounding box
+        # Iterate over unique region labels
+        unique_regions = np.unique(region_labels)
+        region_L = {}
+
+        for region in unique_regions:
+            # Get indices of points belonging to the current region
+            region_indices = np.where(region_labels == region)[0]
+            region_coords = coords[region_indices]
+
+            # Compute L for the current region
+
+            from haversine import haversine, Unit
+            
+            # Load shapefile and filter to the current region
+            shapefile_path = f"../data/fsq/Census/tl_2024_us_zcta520/tl_2024_us_zcta520.shp"
+            zip_gdf = gpd.read_file(shapefile_path)
+            zip_gdf['ZCTA5CE20'] = zip_gdf['ZCTA5CE20'].astype(str)
+            region_polygon = zip_gdf[zip_gdf['ZCTA5CE20'] == str(region)].geometry.iloc[0]
+
+            # Get boundary points of the region polygon
+            boundary_coords = np.array(region_polygon.boundary.coords)
+            boundary_coords = boundary_coords[:, [1, 0]]
+            # Compute min and max coordinates from the boundary points
+            min_coords = boundary_coords.min(axis=0)
+            max_coords = boundary_coords.max(axis=0)
+            # Reverse the order of min_coords and max_coords to ensure lat comes first
+            region_L[region] = haversine(min_coords, max_coords, unit=Unit.KILOMETERS) # distance in km
+
+
+        for region in unique_regions:
+            # Get indices of points belonging to the current region
+            region_indices = np.where(region_labels == region)[0]
+
+            # Iterate over edges within the region
+
+            region_edge_weights = []
+            to_remove_edges = []
+            for i, j in edges:
+                if i in region_indices or j in region_indices:
+                    # Compute spatial distance (Euclidean here; you can use haversine if needed)
+                    l_ij = haversine(coords[i], coords[j], unit=Unit.KILOMETERS) # distance in km
+
+                    # Region similarity weight
+                    wr = 1.0 if region_labels[i] == region_labels[j] else 0.4
+
+                    # Use L corresponding to the region of the first node
+                    L = region_L[region_labels[i].item()] 
+
+                    # Raw edge weight before normalization
+                    weight = max(0, np.log10((1 + L ** 1.5) / (1e-3 + l_ij ** 1.5))) * wr
+
+
+                    edge_index.append([i, j])
+                    edge_index.append([j, i])  # Undirected graph
+
+                    region_edge_weights.append(weight)
+                    region_edge_weights.append(weight)
+
+                    to_remove_edges.append((i, j))
+
+            edges.difference_update(to_remove_edges)
+            if region_edge_weights is not None and len(region_edge_weights) > 0:
+                region_edge_weights = np.array(region_edge_weights)
+                if len(region_edge_weights) == 1:
+                    region_edge_weights = np.array([0.5])
+                elif np.all(region_edge_weights == region_edge_weights[0]):
+                    region_edge_weights = np.full_like(region_edge_weights, 0.5)
+                else:
+                    region_edge_weights = (region_edge_weights - region_edge_weights.min()) / (region_edge_weights.max() - region_edge_weights.min())
+                edge_weights.extend(region_edge_weights.tolist())
+
+        
+    
+        edge_index = torch.tensor(edge_index, dtype=torch.long).T  # shape [2, num_edges]
+        edge_weights = torch.tensor(edge_weights, dtype=torch.float)
+
+        import ipdb; ipdb.set_trace()
+
+    elif method == "dt-global":
+
+        coords = np.array(coords)
+        tri = Delaunay(coords)
+        
+        # Extract undirected edges from triangles
+        edges = set()
+        for simplex in tri.simplices:
+            for i in range(3):
+                a, b = simplex[i], simplex[(i + 1) % 3]
+                edges.add(tuple(sorted((a, b))))
+        
+        edge_index = []
+        edge_weights = []
+
+
+        from haversine import haversine, Unit
+        # Compute a global L for the entire graph
         min_coords = coords.min(axis=0)
         max_coords = coords.max(axis=0)
-        L = np.linalg.norm(max_coords - min_coords)  # Diagonal length
+        L_global = haversine(min_coords, max_coords, unit=Unit.KILOMETERS)  # Diagonal length of bounding box
+
+        import ipdb; ipdb.set_trace()
 
         for i, j in edges:
-            # Compute spatial distance (Euclidean here; you can use haversine if needed)
-            l_ij = np.linalg.norm(coords[i] - coords[j])
+            # Compute spatial distance (Euclidean here; Haversine can be used if needed)
+            l_ij = haversine(coords[i], coords[j], unit=Unit.KILOMETERS)
 
             # Region similarity weight
             wr = 1.0 if region_labels[i] == region_labels[j] else 0.4
 
-            # Raw edge weight before normalization
-            weight = np.log((1 + L ** 1.5) / (1 + l_ij ** 1.5)) * wr
+            # Use global L for all edges
+            weight = max(0, np.log10((1 + L_global ** 1.5) / (1e-3 + l_ij ** 1.5))) * wr
 
+            # Add edges (undirected)
             edge_index.append([i, j])
-            edge_index.append([j, i])  # Undirected graph
-
+            edge_index.append([j, i])
             edge_weights.append(weight)
             edge_weights.append(weight)
 
+        # Normalize edge weights to [0, 1]
+        edge_weights = np.array(edge_weights)
+        if len(edge_weights) == 1:
+            edge_weights = np.array([0.5])
+        elif np.all(edge_weights == edge_weights[0]):
+            edge_weights = np.full_like(edge_weights, 0.5)
+        else:
+            edge_weights = (edge_weights - edge_weights.min()) / (edge_weights.max() - edge_weights.min())
+
+        # Convert to torch tensors
         edge_index = torch.tensor(edge_index, dtype=torch.long).T  # shape [2, num_edges]
         edge_weights = torch.tensor(edge_weights, dtype=torch.float)
 
-        # Normalize edge weights to [0, 1]
-        edge_weights = (edge_weights - edge_weights.min()) / (edge_weights.max() - edge_weights.min())
 
     else:
         raise ValueError(f"Unknown method: {method}. Choose 'knn' or 'dt'.")
-
     
 
     return edge_index, edge_weights
@@ -488,101 +578,203 @@ def extract_5digit_zip(z):
     return None
 
 
-def extract_feats(args, csv_path):
-    df = pd.read_csv(csv_path)
+def merge_similar(names, threshold=90):
+    canonical = {}
+    for name in names:
+
+        name = name.lower()
+        key = name
+        if not canonical:
+            canonical[key] = [name]
+            continue
+        # find the closest existing group
+        result = process.extractOne(
+            key, canonical.keys(), score_cutoff=threshold
+        )
+        if result:
+            match, score, _ = result
+            canonical[match].append(name)
+        else:
+            canonical[key] = [name]
+    return canonical
+
+
+def normalize_us_state(val):
+    """
+    Normalize a state value to standard 2-letter US state/territory code.
+    Returns None if the value is not a valid US state or territory.
+    """
+    if pd.isna(val):
+        return None
+
+    v = str(val).strip()
+    v = re.sub(r'[^A-Za-z]', '', v)  # remove punctuation/numbers
+    v = v.upper()
+
+    # Prepare valid mappings
+    name_to_abbr = {s.name.upper(): s.abbr for s in us.states.STATES}
+    valid_codes = {s.abbr for s in us.states.STATES} | {s.abbr for s in us.states.TERRITORIES}
+
+
+    # Direct match to valid abbreviation
+    if v in valid_codes:
+        return v
+
+    # Full state name match
+    if v in name_to_abbr:
+        return name_to_abbr[v]
+
+    return None
+
+
+def extract_feats(args, path):
+    # Check if the file is a Parquet or CSV file
+    if path.endswith(".parquet"):
+        df = pd.read_parquet(path)
+    elif path.endswith(".csv"):
+        df = pd.read_csv(path)
+    else:
+        raise ValueError("Unsupported file format. Please provide a .csv or .parquet file.")
+    
+    # Sample 10000 rows of the dataframe
+    # df = df.sample(n=10000, random_state=42).reset_index(drop=True)
+    df = df[df["fsq_postcode"] == "10031"].reset_index(drop=True)
 
     # 1. extract fsq_latitude and fsq_longitude
     features = df[["fsq_latitude", "fsq_longitude"]].rename(columns={"fsq_latitude": "latitude", "fsq_longitude": "longitude"})
+    features["fsq_category_ids"] = df["fsq_category_ids"]
 
-    # 2. extract postcode
-    features["postcode"] = df["fsq_postcode"].combine_first(df["osm_postcode"]) # there still will be some nan values for this column
+     # 2. extract postcode
+    features["postcode"] = df["fsq_postcode"]
+    features["postcode"] = features["postcode"].apply(extract_5digit_zip)
 
-    # 3. extract locality (city)
-    features["locality"] = df["fsq_locality"].combine_first(df["osm_address"].str.extract(r'"city"\s*=>\s*"([^"]+)"')[0]) # there still will be some nan values for this column
+    
 
-    # 4. extract state
-    features ["state"] = df["abbr"]
+    # 3. extract state
+    features["state"] = df["fsq_region"].apply(normalize_us_state)
+
+    
+    
+    # 4. extract locality (city)
+    features["locality"] = df["fsq_locality"]
+    
 
     # 5. extract fsq_date_created and fsq_date_closed
     features["date_created"] = df["fsq_date_created"]
     features["date_closed"] = df["fsq_date_closed"]
 
-    # 6. 
-    categories_df = pd.read_csv("/scratch/mhashe4/repos/fm/data/f-osm/raw/personalization-apis-movement-sdk-categories.csv")
+    # filter by state if provided
+    if args.state is not None:
+        features = features[features["state"].str.lower() == args.state.lower()].reset_index(drop=True)
+    else:
+        print("No state provided, using all states in the dataset.")
+
+    # features = features.sample(n=5000, random_state=42).reset_index(drop=True)
+    
+    # 6. Extract categories
+    categories_df = pd.read_csv(f"{args.load_path}/fsq/raw/personalization-apis-movement-sdk-categories.csv")
     category_id_to_label = dict(zip(categories_df["Category ID"], categories_df["Category Label"]))
 
 
-    def parse_category_ids(x):
-        if pd.isna(x):
-            return []
-        cleaned = re.sub(r"[\'\[\]]", "", str(x)).strip()
-        return cleaned.split()
+    def extract_and_normalize_categories(df, category_id_to_label):
+        """
+        Extract and normalize category levels from the DataFrame.
 
-    # Step 2: Dynamically extract all category levels
-    def get_category_levels_dynamic(id_list):
-        level_lists = []
+        Args:
+            df (pd.DataFrame): Input DataFrame containing 'fsq_category_ids'.
+            category_id_to_label (dict): Mapping of category IDs to category labels.
 
-        if not isinstance(id_list, list):
-            return []
+        Returns:
+            pd.DataFrame: DataFrame with normalized category levels as columns.
+        """
+        def parse_category_ids(x):
+            if pd.isna(x):
+                return []
+            cleaned = re.sub(r"[\'\[\]]", "", str(x)).strip()
+            return cleaned.split()
 
-        for cid in id_list:
-            label = category_id_to_label.get(cid)
-            if label:
-                parts = label.replace('"', '').replace("'", '').replace('[', '').replace(']', '').strip().split(" > ")
-                
-                # Ensure we have a list of lists where each sublist holds one level across all rows
-                for i, part in enumerate(parts):
-                    if len(level_lists) <= i:
-                        level_lists.append([])
-                    level_lists[i].append(part)
+        def get_category_levels_dynamic(id_list):
+            level_lists = []
 
-        return level_lists
+            if not isinstance(id_list, list):
+                return []
+
+            level_lists = [
+                [part for part in label.replace('"', '').replace("'", '').replace('[', '').replace(']', '').strip().split(" > ")]
+                for cid in id_list
+                if (label := category_id_to_label.get(cid))
+            ]
+            level_lists = list(map(list, zip(*level_lists))) if level_lists else []
+
+
+            return level_lists
+
+        # Parse category IDs
+        df["fsq_category_ids"] = df["fsq_category_ids"].apply(parse_category_ids)
+
+        # Extract category levels dynamically
+        category_levels = df["fsq_category_ids"].apply(get_category_levels_dynamic)
+
+        # Determine max number of levels across all rows
+        max_levels = category_levels.apply(len).max()
+
+        # Initialize empty columns in features
+        for i in range(max_levels):
+            level_col_name = f"category_lvl{i+1}"
+            df[level_col_name] = category_levels.apply(lambda x: x[i][-1] if len(x) > i and isinstance(x[i], list) and x[i] else None)
+
+        return df
+
+    features = extract_and_normalize_categories(features, category_id_to_label)
+
+    features = features[features["category_lvl1"].notna() & features["state"].notna() & features["postcode"].notna()
+                         & features["latitude"].notna() & features["longitude"].notna()].reset_index(drop=True)
+    features = features.drop(columns=["fsq_category_ids"])
+
+
+    # 7. Spatial join POIs with state polygons to validate state and postcode
+    import geopandas as gpd
+
+    states = gpd.read_file("https://www2.census.gov/geo/tiger/GENZ2022/shp/cb_2022_us_state_20m.zip")
     
-    # Step 3: Apply parsing to the DataFrame
-    df["fsq_category_ids"] = df["fsq_category_ids"].apply(parse_category_ids)
+    gdf = gpd.GeoDataFrame(
+        features,
+        geometry=gpd.points_from_xy(features["longitude"], features["latitude"]),
+        crs="EPSG:4326"
+    )
 
-    # Extract category levels dynamically
-    category_levels = df["fsq_category_ids"].apply(get_category_levels_dynamic)
+    features = gpd.sjoin(gdf, states[['STUSPS', 'geometry']], how="inner", predicate="within")
+    # features_mismatched = features[features["state"] != features["STUSPS"]].reset_index(drop=True)
+    features = features[features["state"] == features["STUSPS"]].reset_index(drop=True)
+    features = features.drop(columns=["geometry", "index_right", "STUSPS"])
 
-    # Step 4: Normalize into columns
-    # Determine max number of levels across all rows
-    max_levels = category_levels.apply(len).max()
+    del gdf
 
-    # Initialize empty columns in features
-    for i in range(max_levels):
-        level_col_name = f"category_lvl{i+1}"
-        features[level_col_name] = category_levels.apply(lambda x: x[i][-1] if len(x) > i and isinstance(x[i], list) and x[i] else None)
-
-    features = features[features["category_lvl1"].notna()].reset_index(drop=True)
-    features = features[features["locality"].notna()].reset_index(drop=True)
-
-    features["postcode"] = features["postcode"].apply(extract_5digit_zip)
-    features = features[features["postcode"].notna()].reset_index(drop=True)
-    features = features[features["postcode"].astype(str).str.match(r"^\d{4,5}$")] # filter out those which are not 4 or 5 digit zipcodes
-    
-    # match with pdfm embeddings
+    # 8. match with pdfm embeddings
     pdfm_zipcode_embeddings = pd.read_csv("/scratch/mhashe4/repos/fm/pdfm/data/pdfm_embeddings/v0/us/zcta_embeddings.csv")
     pdfm_zipcode_embeddings["place"] = pdfm_zipcode_embeddings["place"].str.replace("zip/", "", regex=False)
 
-
-    merged = features.merge(
-        pdfm_zipcode_embeddings[["place", "state"]].rename(columns={"place": "postcode", "state": "state_embed"}),
+    pdfm_zipcode_embeddings.rename(columns={"state": "pdfm_state", 
+                                            "place": "postcode",
+                                            "city": "pdfm_locality"}, inplace=True)
+    
+    features = features.merge(
+        pdfm_zipcode_embeddings[["postcode", "pdfm_state", "pdfm_locality"]],
         on="postcode",
-        how="left"
+        how="inner"
     )
+    # Drop unnecessary columns
+    features = features[features["state"] == features["pdfm_state"]].reset_index(drop=True)
+    features = features.drop(columns=["pdfm_state", "pdfm_locality"])
 
-    # Keep only rows where state matches
-    features = merged[merged["state"] == merged["state_embed"]].drop(columns=["state_embed"])
+    # Merge similar localities using fuzzy matching
+    features["locality"] = features["locality"].str.lower()
+    all_localities = features["locality"].dropna().unique()
+    locality_similarities = merge_similar(all_localities, threshold=90)
 
-
-    # filter pois belonging to postcodes that are rare
-    postcode_counts = features.groupby("postcode")["postcode"].transform("count")
-    features = features[postcode_counts >= 10]
-
-                
-    features["postcode"] = features["postcode"].astype(int)
-    features = features[features["locality"].str.lower() == args.city.lower()]
-
+    # Replace all localities with their matched key in locality_similarities
+    for key, values in locality_similarities.items():
+        features["locality"] = features["locality"].replace(values, key)
 
     return features
 
@@ -707,6 +899,7 @@ from torch_geometric.loader import DataLoader
 import torch
 import pyfpgrowth
 import geopandas as gpd
+from geopy.distance import geodesic
 
 
 def disjointed_union(tree_list, class_=None, device=None):

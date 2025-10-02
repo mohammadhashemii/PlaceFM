@@ -15,10 +15,10 @@ if __name__ == '__main__':
     seed_everything(args.seed)
 
     # load the region embeddings
-    region_embs = torch.load(args.embeddings)
+    region_embs = torch.load(args.embeddings, map_location=torch.device('cpu'), weights_only=False)
 
     evaluator = Evaluator(args)
 
-    tasks = ['pd', 'hp']
+    tasks = ['pd', 'hp', 'pv']
     for t in tasks:
         res_dict = evaluator.evaluate(region_embs, task=t, verbose=args.verbose)

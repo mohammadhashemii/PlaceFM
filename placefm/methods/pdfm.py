@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import torch
 from timeit import default_timer as timer
+from sklearn.decomposition import PCA
 
 class PDFM:
     """
@@ -49,8 +50,14 @@ class PDFM:
             
 
 
+        region_emb = np.array(selected_embeddings)
+        if region_emb.ndim == 3:
+            region_emb = region_emb[:, 0, :]
+        
+        # Reduce the dimension of the embeddings to 30 using PCA
+        pca = PCA(n_components=30)
+        region_emb = pca.fit_transform(region_emb)
 
-        region_emb = np.array(selected_embeddings)[:,0,:]
         region_emb_ids = unique_regions
 
 
@@ -61,7 +68,8 @@ class PDFM:
         args = self.args
 
         start_total = timer()
-        region_emb, region_emb_ids = self.load_embeddings(features="maps")
+        features = "maps" # it can be "all" or "maps"
+        region_emb, region_emb_ids = self.load_embeddings(features=features)
         end_total = timer()
         
         if verbose:
@@ -69,7 +77,7 @@ class PDFM:
                 f"=== Finished generating trained region embeddings in {end_total - start_total:.2f} sec ==="
             )
         
-        print(f"Total number of generated regions in {args.city}: {region_emb.shape[0]}")
+        print(f"Total number of generated regions in {args.state}: {region_emb.shape[0]}")
         
         # Save both region embeddings and region IDs in a dictionary
     
@@ -79,8 +87,8 @@ class PDFM:
         }
 
         if save_path is not None:
-            save_path = f"../checkpoints/pdfm_{args.city}_region_embs.pt"
+            save_path = f"../checkpoints/pdfm/{features}_{args.state}_region_embs.pt"
             torch.save(save_obj, save_path)
-            print(f"Region embeddings of {args.city} has been save to {save_path}")
+            print(f"Region embeddings of {args.state} has been save to {save_path}")
 
         return save_obj
