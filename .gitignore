@@ -1,7 +1,6 @@
 # project files
 raw/
 pdfm_embeddings/
-figs/
 checkpoints/
 
 .vscode/
