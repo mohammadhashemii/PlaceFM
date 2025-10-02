@@ -1,4 +1,6 @@
 # PlaceFM
+A Training-free Geospatial Foundation Model of Places using Large-Scale Point of Interest Data.
+
 
 <div align=center><img src="https://github.com/mohammadhashemii/PlaceFM/blob/main/figs/pipeline.png"/></div>
 
