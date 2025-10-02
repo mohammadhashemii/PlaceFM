@@ -1,6 +1,6 @@
 # PlaceFM
 
-<div align=center><img src="https://github.com/mohammadhashemii/PlaceFM/blob/main/figs/pipeline.png" width="500" /></div>
+<div align=center><img src="https://github.com/mohammadhashemii/PlaceFM/blob/main/figs/pipeline.png"/></div>
 
 
 ## Prepare Environments
